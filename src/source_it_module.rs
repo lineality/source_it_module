@@ -1,36 +1,30 @@
 //! # source_it Module
 //!
+//! ## Usage:
+//!
+//! fn main() {
+//! let args: Vec<String> = std::env::args().collect();
+//!
+//! if args.contains(&"--source".to_string()) {
+//!     match handle_sourceit_command("my_fft_tool", None, SOURCE_FILES) {
+//!         Ok(path) => println!("Source extracted to: {}", path.display()),
+//!         Err(e) => eprintln!("Failed to extract source: {}", e),
+//!     }
+//!     return;
+//! }
+//!
+//! }
+//!
 //! Embeds source files at compile-time and provides extraction at runtime.
 //! This ensures open-source code remains accessible independent of external repositories.
 //!
-//! ## Usage
-//! ```rust,no_run
-//! use source_it::{handle_sourceit_command, verify_extracted_files, SourcedFile};
-//!
-//! const SOURCE_FILES: &[SourcedFile] = &[
-//!     SourcedFile::new("Cargo.toml", include_str!("../Cargo.toml")),
-//!     SourcedFile::new("src/main.rs", include_str!("main.rs")),
-//! ];
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let path = handle_sourceit_command("my_app", None, SOURCE_FILES)?;
-//!
-//! // Verify the extraction
-//! let verification_errors = verify_extracted_files_content(&path, SOURCE_FILES)?;
-//! if verification_errors.is_empty() {
-//!     println!("All files verified successfully!");
-//! }
-//! # Ok(())
-//! # }
-//! ```
 
-use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 /*
@@ -189,9 +183,6 @@ pub fn handle_sourceit_command(
         });
     }
 
-    // Calculate checksum of all content
-    let checksum = calculate_checksum(source_files);
-
     // Extract each file
     for sourced_file in source_files {
         if let Err(e) = extract_file(&extraction_path, sourced_file) {
@@ -201,12 +192,10 @@ pub fn handle_sourceit_command(
         }
     }
 
-    // Write checksum file for verification
-    let checksum_path = extraction_path.join("SOURCE_CHECKSUM.txt");
-    if let Err(e) = write_checksum_file(&checksum_path, checksum) {
-        return Err(SourceExtractionError {
-            message: format!("Failed to write checksum file: {}", e),
-        });
+    // Generate SHA256 checksums for extracted files (Linux/macOS only)
+    if let Err(e) = generate_sha256_checksums(&extraction_path, source_files) {
+        // Non-fatal: just warn if checksums can't be generated
+        eprintln!("Warning: Could not generate SHA256 checksums: {}", e);
     }
 
     // Return absolute path to extracted directory
@@ -275,30 +264,167 @@ fn extract_file(base_path: &Path, sourced_file: &SourcedFile) -> Result<(), Box<
     Ok(())
 }
 
-/// Calculates a checksum for all source files
-fn calculate_checksum(source_files: &[SourcedFile]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-
-    // Hash files in a consistent order
-    for file in source_files {
-        file.path.hash(&mut hasher);
-        file.content.hash(&mut hasher);
+/// Generates SHA256 checksums for extracted files using OS-native commands
+///
+/// This function creates a SHA256SUMS.txt file containing checksums that can be
+/// verified using standard POSIX tools (sha256sum on Linux, shasum on macOS).
+///
+/// # Arguments
+/// * `extraction_path` - Path to the directory containing extracted files
+/// * `source_files` - Array of source files that were extracted
+///
+/// # Returns
+/// * `Ok(())` - If checksum file was created successfully
+/// * `Err` - If there was an error creating the checksum file
+fn generate_sha256_checksums(
+    extraction_path: &Path,
+    source_files: &[SourcedFile],
+) -> Result<(), Box<dyn Error>> {
+    // Only proceed on Linux and macOS
+    if !cfg!(target_os = "linux") && !cfg!(target_os = "macos") {
+        // Skip checksum generation on other operating systems
+        return Ok(());
     }
 
-    hasher.finish()
+    let checksum_path = extraction_path.join("SHA256SUMS.txt");
+    let mut checksum_file = match fs::File::create(&checksum_path) {
+        Ok(file) => file,
+        Err(e) => {
+            // If we can't create the checksum file, skip silently
+            eprintln!("Warning: Could not create SHA256SUMS.txt: {}", e);
+            return Ok(());
+        }
+    };
+
+    // Write header with verification instructions
+    writeln!(
+        checksum_file,
+        "# SHA256 checksums for extracted source files\n\
+         # To verify on Linux: sha256sum -c SHA256SUMS.txt\n\
+         # To verify on macOS: shasum -a 256 -c SHA256SUMS.txt\n\
+         # Or verify individual files:\n\
+         # Linux: sha256sum /path/to/your/file.txt\n\
+         # macOS: shasum -a 256 /path/to/your/file.txt\n"
+    )?;
+
+    // Process each file
+    for sourced_file in source_files {
+        let file_path = extraction_path.join(sourced_file.path);
+
+        // Get absolute path for the file
+        let absolute_path = match file_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                // If we can't get absolute path, write error and continue
+                writeln!(checksum_file, "error {}", file_path.display())?;
+                eprintln!(
+                    "Warning: Could not get absolute path for {}: {}",
+                    sourced_file.path, e
+                );
+                continue;
+            }
+        };
+
+        // Calculate SHA256 using OS command
+        let hash = calculate_sha256_for_file(&absolute_path);
+
+        match hash {
+            Ok(hash_string) => {
+                // Write in standard format: hash<space><space>path
+                writeln!(
+                    checksum_file,
+                    "{}  {}",
+                    hash_string,
+                    absolute_path.display()
+                )?;
+            }
+            Err(e) => {
+                // Write error entry and continue
+                writeln!(checksum_file, "error {}", absolute_path.display())?;
+                eprintln!(
+                    "Warning: Could not calculate SHA256 for {}: {}",
+                    sourced_file.path, e
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
-/// Writes checksum to a file for verification
-fn write_checksum_file(path: &Path, checksum: u64) -> Result<(), Box<dyn Error>> {
-    let mut file = fs::File::create(path)?;
-    writeln!(
-        file,
-        "Source extraction checksum: {:#016x}\n\
-         This file verifies the integrity of extracted source files.\n\
-         Generated by source_it module.",
-        checksum
-    )?;
-    Ok(())
+/// Calculates SHA256 hash for a single file using OS-native command
+///
+/// Uses sha256sum on Linux and shasum on macOS.
+///
+/// # Arguments
+/// * `file_path` - Absolute path to the file
+///
+/// # Returns
+/// * `Ok(String)` - The SHA256 hash as a hex string
+/// * `Err` - If the command fails or is not available
+fn calculate_sha256_for_file(file_path: &Path) -> Result<String, Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        calculate_sha256_linux(file_path)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        calculate_sha256_macos(file_path)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err("SHA256 calculation not supported on this OS".into())
+    }
+}
+
+/// Linux-specific SHA256 calculation using sha256sum
+#[cfg(target_os = "linux")]
+fn calculate_sha256_linux(file_path: &Path) -> Result<String, Box<dyn Error>> {
+    let output = Command::new("sha256sum").arg(file_path).output()?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "sha256sum failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    // sha256sum output format: "hash  filename"
+    // We only want the hash part
+    let output_str = String::from_utf8(output.stdout)?;
+    let hash = output_str
+        .split_whitespace()
+        .next()
+        .ok_or("Invalid sha256sum output")?;
+
+    Ok(hash.to_string())
+}
+
+/// macOS-specific SHA256 calculation using shasum
+#[cfg(target_os = "macos")]
+fn calculate_sha256_macos(file_path: &Path) -> Result<String, Box<dyn Error>> {
+    let output = Command::new("shasum")
+        .arg("-a")
+        .arg("256")
+        .arg(file_path)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!("shasum failed: {}", String::from_utf8_lossy(&output.stderr)).into());
+    }
+
+    // shasum output format: "hash  filename"
+    // We only want the hash part
+    let output_str = String::from_utf8(output.stdout)?;
+    let hash = output_str
+        .split_whitespace()
+        .next()
+        .ok_or("Invalid shasum output")?;
+
+    Ok(hash.to_string())
 }
 
 #[cfg(test)]
@@ -321,26 +447,6 @@ mod sourceit_tests {
         // Should be in format YYYYMMDD_HHMMSS (15 chars)
         assert_eq!(timestamp.len(), 15);
         assert!(timestamp.contains('_'));
-    }
-
-    /// Test checksum calculation consistency
-    #[test]
-    fn test_checksum_calculation() {
-        let files = vec![
-            SourcedFile::new("file1.rs", "content1"),
-            SourcedFile::new("file2.rs", "content2"),
-        ];
-
-        let checksum1 = calculate_checksum(&files);
-        let checksum2 = calculate_checksum(&files);
-
-        // Same files should produce same checksum
-        assert_eq!(checksum1, checksum2);
-
-        // Different files should produce different checksum
-        let files2 = vec![SourcedFile::new("file3.rs", "content3")];
-        let checksum3 = calculate_checksum(&files2);
-        assert_ne!(checksum1, checksum3);
     }
 
     /// Test error handling for empty crate name

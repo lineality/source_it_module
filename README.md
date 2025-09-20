@@ -15,7 +15,7 @@ When users run 'your_app --source', they get the complete source code.
 
 
 # Installation & Use
-### 1. Copy the source_it.rs file into your project:
+### 1. Copy the source_it_module.rs file into your project:
 
 ### 2. Set Up in main.rs
 
