@@ -1,7 +1,12 @@
 #### source_it
-Rust module for embedding source code directly into compiled binaries:
+A Rust module for embedding source code directly into compiled binaries:
 enabling self-contained open-source distribution.
 Any application with source_it added can reproduce its own source code files.
+
+- cli,     Command line application
+- module,  Add it to rust terminal applications
+- vanilla, Vanilla Rust (no 3rd party dependencies)
+- MIT,     Do what you will with it.
 
 ### Problem to solve:
 Public repositories may not be available, may not be known,
@@ -18,11 +23,9 @@ When users run 'your_app --source', they get the complete source code.
 ### 1. Copy the source_it_module.rs file into your project:
 
 ### 2. Set Up in main.rs
+- List file each to include. You MUST list each file. There is no auto-detection or auto-inclusion.
 
 #### Example:
-- List each to include. You MUST list each file,
-there is no auto-detection or auto-inclusion.
-
 ```rust
 // In main.rs:
 mod source_it_module;
@@ -44,10 +47,13 @@ const SOURCE_FILES: &[SourcedFile] = &[
 ];
 
 fn main() {
+    // get arguments
     let args: Vec<String> = std::env::args().collect();
 
+    // if --source, then source it...
     if args.contains(&"--source".to_string()) {
         match handle_sourceit_command("my_fft_tool", None, SOURCE_FILES) {
+            // print the file path where the source now is...
             Ok(path) => println!("Source extracted to: {}", path.display()),
             Err(e) => eprintln!("Failed to extract source: {}", e),
         }
@@ -59,12 +65,17 @@ fn main() {
 
 ```
 ### 3. Use source_it
+when installed (or alias)
 ```bash
 my_app --source
 ```
-or
+or, in rust
 ```bash
 cargo run -- --source
+```
+or, uninstalled binary
+```bash
+./my_app --source
 ```
 
 #### sample output
@@ -78,6 +89,7 @@ cargo run -- --source
 - Compile-time size - All files embedded at compilation
 - Manual listing - No automatic file discovery
 - No compression - Files stored as-is (rely on binary compression if needed)
+- sha256 checksums created for varification on some POSIX operating systems
 
 
-In 20 years, GitHub might be gone, but good STEM code can outlive unmaintainable systems.
+Many public code repositories may not last for decades or centuries, but good STEM code can outlive unmaintainable systems.
