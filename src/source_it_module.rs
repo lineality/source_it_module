@@ -281,7 +281,16 @@ fn generate_sha256_checksums(
     source_files: &[SourcedFile],
 ) -> Result<(), Box<dyn Error>> {
     // Only proceed on Linux and macOS
-    if !cfg!(target_os = "linux") && !cfg!(target_os = "macos") {
+    if !cfg!(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+    )) {
         // Skip checksum generation on other operating systems
         return Ok(());
     }
@@ -300,11 +309,14 @@ fn generate_sha256_checksums(
     writeln!(
         checksum_file,
         "# SHA256 checksums for extracted source files\n\
-         # To verify on Linux: sha256sum -c SHA256SUMS.txt\n\
+         # To verify on Linux/Android: sha256sum -c SHA256SUMS.txt\n\
          # To verify on macOS: shasum -a 256 -c SHA256SUMS.txt\n\
+         # To verify on macOS/BSD: shasum -a 256 -c SHA256SUMS.txt\n\
+         # To verify on Windows: CertUtil -hashfile <filename> sha256\n\
          # Or verify individual files:\n\
-         # Linux: sha256sum /path/to/your/file.txt\n\
-         # macOS: shasum -a 256 /path/to/your/file.txt\n"
+         # Linux/Android: sha256sum /path/to/your/file.txt\n\
+         # macOS: shasum -a 256 /path/to/your/file.txt\n\
+         # Windows: CertUtil -hashfile C:\\path\\to\\your\\file.txt sha256\n"
     )?;
 
     // Process each file
@@ -363,24 +375,39 @@ fn generate_sha256_checksums(
 /// * `Ok(String)` - The SHA256 hash as a hex string
 /// * `Err` - If the command fails or is not available
 fn calculate_sha256_for_file(file_path: &Path) -> Result<String, Box<dyn Error>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android",))]
     {
         calculate_sha256_linux(file_path)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+    ))]
     {
-        calculate_sha256_macos(file_path)
+        calculate_sha256_macos_bsd(file_path)
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "windows"
+    )))]
     {
         Err("SHA256 calculation not supported on this OS".into())
     }
 }
 
 /// Linux-specific SHA256 calculation using sha256sum
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android",))]
 fn calculate_sha256_linux(file_path: &Path) -> Result<String, Box<dyn Error>> {
     let output = Command::new("sha256sum").arg(file_path).output()?;
 
@@ -404,8 +431,14 @@ fn calculate_sha256_linux(file_path: &Path) -> Result<String, Box<dyn Error>> {
 }
 
 /// macOS-specific SHA256 calculation using shasum
-#[cfg(target_os = "macos")]
-fn calculate_sha256_macos(file_path: &Path) -> Result<String, Box<dyn Error>> {
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+))]
+fn calculate_sha256_macos_bsd(file_path: &Path) -> Result<String, Box<dyn Error>> {
     let output = Command::new("shasum")
         .arg("-a")
         .arg("256")
@@ -425,6 +458,48 @@ fn calculate_sha256_macos(file_path: &Path) -> Result<String, Box<dyn Error>> {
         .ok_or("Invalid shasum output")?;
 
     Ok(hash.to_string())
+}
+
+/// Windows-specific SHA256 calculation using CertUtil
+#[cfg(target_os = "windows")]
+fn calculate_sha256_windows(file_path: &Path) -> Result<String, Box<dyn Error>> {
+    let output = Command::new("CertUtil")
+        .arg("-hashfile")
+        .arg(file_path)
+        .arg("sha256")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "CertUtil failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    // CertUtil output format is different - it outputs multiple lines:
+    // SHA256 hash of file:
+    // <hash value>
+    // CertUtil: -hashfile command completed successfully.
+    // We need to extract the hash line (second line)
+    let output_str = String::from_utf8(output.stdout)?;
+
+    // Split by lines and find the hash (usually the second non-empty line)
+    let lines: Vec<&str> = output_str.lines().collect();
+
+    // The hash is typically on the second line, after "SHA256 hash of" header
+    let hash = lines
+        .get(1)
+        .ok_or("Invalid CertUtil output: missing hash line")?
+        .trim()
+        .replace(" ", ""); // CertUtil sometimes adds spaces in the hash
+
+    // Validate that we got a proper hash (64 hex chars for SHA256)
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("Invalid hash from CertUtil: {}", hash).into());
+    }
+
+    Ok(hash.to_lowercase()) // Normalize to lowercase for consistency
 }
 
 #[cfg(test)]
